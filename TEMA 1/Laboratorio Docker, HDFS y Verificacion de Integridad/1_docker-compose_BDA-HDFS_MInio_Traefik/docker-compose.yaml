@@ -1,0 +1,209 @@
+name: bda-iesgrancapitan
+
+networks:
+    bda-network:
+        driver: bridge
+        name: bda-network
+
+volumes:
+    namenode_data:
+    secondary_namenode_data:
+    datanode1_data:
+    datanode2_data:
+    datanode3_data:
+    portainer_data:
+    minio_data:
+
+services:
+    # --- INFRAESTRUCTURA DEVOPS ---
+
+    # --- TRAEFIK: Reverse Proxy y Gestor de Rutas ---
+    # Traefik actúa como el único punto de entrada (puerta de enlace) para nuestro cluster.
+    # Su función es interceptar todas las peticiones HTTP (en el puerto 80) y, basándose
+    # en el dominio solicitado (ej. 'portainer.localhost'), redirigir el tráfico al 
+    # contenedor correcto de forma automática. Esto nos evita tener que gestionar y recordar
+    # un puerto diferente para cada servicio. El dashboard en el puerto 8089 nos permite
+    # ver las rutas que ha descubierto y si están activas.
+    #Si quiere añadirlo a más servicios, usa la etiqueta 'labels' para definir las reglas de Traefik, como está en portainer y namenode
+    traefik:
+        image: traefik:v3.7
+        container_name: traefik
+        command:
+        - "--api.insecure=true" # Habilita el dashboard inseguro para desarrollo
+        - "--providers.docker=true" # Escucha eventos de Docker
+        - "--providers.docker.exposedbydefault=false" # Seguridad: No exponer nada automáticamente
+        - "--entrypoints.web.address=:80" # Punto de entrada HTTP estándar
+        ports:
+        - "80:80"       # Peticiones HTTP del host
+        - "8089:8080"   # Dashboard de administración de Traefik
+        volumes:
+        - "/var/run/docker.sock:/var/run/docker.sock:ro" # Traefik necesita acceso al socket de Docker
+        networks:
+        - bda-network
+        profiles: ["storage", "pipeline"]
+
+    # --- PORTAINER: Interfaz Gráfica para Docker ---
+    # Portainer nos da una UI web para gestionar de forma visual nuestros contenedores,
+    # imágenes, redes y volúmenes, facilitando la administración del entorno Docker.
+    #
+    # Este servicio está configurado para ser accesible de dos maneras:
+    # 1. Acceso Directo: A través del puerto 9000 (http://localhost:9000). Esto es gracias
+    #    a la sección 'ports'. Es un acceso fiable y directo.
+    # 2. Acceso vía Traefik: Las 'labels' definen la regla para acceder por el dominio
+    #    http://portainer.localhost. Esto permite unificar el acceso a todos los servicios
+    #    bajo el mismo proxy inverso, usando nombres amigables en lugar de puertos
+    portainer:
+        image: portainer/portainer-ce:latest
+        container_name: portainer
+        networks:
+        - bda-network
+        ports:
+            # Mapeo de puertos directo: <PUERTO_EN_EL_HOST>:<PUERTO_EN_EL_CONTENEDOR>
+            # Exponemos la UI de Portainer (puerto 9000) en el puerto 9010 de nuestra máquina para evitar conflictos con el 9000 del namenode
+            - "9010:9000"
+        volumes:
+        - "/var/run/docker.sock:/var/run/docker.sock:ro" # Acceso al socket de Docker
+        - portainer_data:/data # Volumen para persistir la data de Portainer
+        command: -H unix:///var/run/docker.sock
+        labels:
+            # Activamos Traefik para este contenedor
+            - "traefik.enable=true"
+            # Regla: si el host es 'portainer.localhost', reenvía a este servicio
+            - "traefik.http.routers.portainer.rule=Host(`portainer.localhost`)"
+            # Definimos el punto de entrada (entrypoint) como 'web' (puerto 80)
+            - "traefik.http.routers.portainer.entrypoints=web"
+            # IMPORTANTE: Decirle a Traefik cuál es el puerto interno del servicio web (9000)
+            - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+        profiles: ["storage", "pipeline"]
+
+
+      # --- CAPA DE ALMACENAMIENTO (HDFS)  ---
+    namenode:
+        image: apache/hadoop:3.5.0
+        container_name: namenode
+        hostname: namenode
+        user: root
+        networks:
+            bda-network:
+                aliases:
+                    - cluster-bda # Alias for the namenode service. Para que así pueda resolver docker. Docker registra ese nombre de host en la red.
+        ports:
+            - "9870:9870" # UI Web
+        env_file:
+            - ./hadoop.env
+        #environment:
+            # Esta variable formatea el NameNode si la carpeta está vacía
+            #- ENSURE_NAMENODE_DIR="/opt/hadoop/hadoop_data/hdfs/namenode"
+        volumes:
+            - namenode_data:/opt/hadoop/hadoop_data/hdfs/namenode
+            # --- Bind Mount de la carpeta data de nuestro host ---
+            - ./data:/opt/hadoop/shared_data
+        #command: ["hdfs", "namenode"]
+        command: 
+        - "/bin/bash"
+        - "-c"
+        - "if [ ! -d /opt/hadoop/hadoop_data/hdfs/namenode/current ]; then echo '--- FORMATTING NAMENODE (FRESH START) ---'; hdfs namenode -format -nonInteractive; else echo '--- NAMENODE DATA FOUND (NO FORMAT) ---'; fi; hdfs namenode"
+        labels:
+            # Activamos Traefik para este contenedor
+            - "traefik.enable=true"
+            # Regla de enrutamiento: responder a namenode.localhost
+            - "traefik.http.routers.namenode.rule=Host(`namenode.localhost`)"
+            # IMPORTANTE: Decirle a Traefik cuál es el puerto interno del servicio web (9870)
+            - "traefik.http.services.namenode.loadbalancer.server.port=9870"
+        profiles: ["storage", "pipeline"]
+
+
+    secondary_namenode:
+        image: apache/hadoop:3.5.0
+        container_name: secondary_namenode
+        hostname: secondary_namenode
+        user: root
+        networks:
+            - bda-network
+        ports:
+            - "9868:9868"
+        env_file:
+            - ./hadoop.env
+        depends_on:
+            - namenode
+        volumes:
+            - secondary_namenode_data:/opt/hadoop/hadoop_data/hdfs/secondary_namenode
+            # --- Bind Mount carpeta data de nuestro host ---
+            - ./data:/opt/hadoop/shared_data
+        command: ["hdfs", "secondarynamenode"]
+        profiles: ["storage", "pipeline"]
+
+    datanode1:
+        image: apache/hadoop:3.5.0
+        container_name: datanode1
+        hostname: datanode1
+        user: root
+        networks:
+            - bda-network
+        env_file:
+            - ./hadoop.env
+        depends_on:
+            - namenode
+        volumes:
+            - datanode1_data:/opt/hadoop/hadoop_data/hdfs/datanode
+        command: ["hdfs", "datanode"]
+        profiles: ["storage", "pipeline"]
+
+    datanode2:
+        image: apache/hadoop:3.5.0
+        container_name: datanode2
+        hostname: datanode2
+        user: root
+        networks:
+            - bda-network
+        env_file:
+            - ./hadoop.env
+        depends_on:
+            - namenode
+        volumes:
+            - datanode2_data:/opt/hadoop/hadoop_data/hdfs/datanode
+        command: ["hdfs", "datanode"]
+        profiles: ["storage", "pipeline"]
+
+
+    # --- CAPA OBJECT STORAGE: MINIO S3 (Imagen Segura Chainguard sin Licencias) ---
+    # Documentación: https://images.chainguard.dev/directory/image/minio/versions
+    minio:
+      image: cgr.dev/chainguard/minio:latest
+      container_name: minio
+      hostname: minio
+      environment:
+        - MINIO_ROOT_USER=minioadmin
+        - MINIO_ROOT_PASSWORD=minioadmin
+      command: server /data --console-address ":9001"
+      ports:
+        - "9001:9001"   # Consola Web MinIO (UI de administración)
+        - "9002:9000"   # API S3 de MinIO (Mapeada a 9002 para evitar colisión con RPC Hadoop 9000)
+      volumes:
+        - minio_data:/data
+      networks:
+        - bda-network
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.minio.rule=Host(`minio.localhost`)"
+        - "traefik.http.services.minio.loadbalancer.server.port=9001"
+      mem_limit: 256m
+      profiles: ["storage", "pipeline"]
+
+    # --- CLIENTE OFICIAL MINIO CLI (mc) ---
+    # Contenedor auxiliar de soporte para interactuar con la API S3 mediante comandos mc
+    # Se utiliza la variante :latest-dev porque incorpora /bin/sh para mantener el servicio activo
+    # Documentación: https://images.chainguard.dev/directory/image/minio-client/
+    minio-client:
+      image: cgr.dev/chainguard/minio-client:latest-dev
+      container_name: minio-client
+      networks:
+        - bda-network
+      volumes:
+        - ./data:/data
+      depends_on:
+        - minio
+      entrypoint: /bin/sh
+      command: -c "tail -f /dev/null"
+      mem_limit: 128m
+      profiles: ["storage", "pipeline"]
