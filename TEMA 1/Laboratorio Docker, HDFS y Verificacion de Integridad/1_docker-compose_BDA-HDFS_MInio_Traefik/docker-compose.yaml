@@ -42,42 +42,7 @@ services:
         - bda-network
         profiles: ["storage", "pipeline"]
 
-    # --- PORTAINER: Interfaz Gráfica para Docker ---
-    # Portainer nos da una UI web para gestionar de forma visual nuestros contenedores,
-    # imágenes, redes y volúmenes, facilitando la administración del entorno Docker.
-    #
-    # Este servicio está configurado para ser accesible de dos maneras:
-    # 1. Acceso Directo: A través del puerto 9000 (http://localhost:9000). Esto es gracias
-    #    a la sección 'ports'. Es un acceso fiable y directo.
-    # 2. Acceso vía Traefik: Las 'labels' definen la regla para acceder por el dominio
-    #    http://portainer.localhost. Esto permite unificar el acceso a todos los servicios
-    #    bajo el mismo proxy inverso, usando nombres amigables en lugar de puertos
-    portainer:
-        image: portainer/portainer-ce:latest
-        container_name: portainer
-        networks:
-        - bda-network
-        ports:
-            # Mapeo de puertos directo: <PUERTO_EN_EL_HOST>:<PUERTO_EN_EL_CONTENEDOR>
-            # Exponemos la UI de Portainer (puerto 9000) en el puerto 9010 de nuestra máquina para evitar conflictos con el 9000 del namenode
-            - "9010:9000"
-        volumes:
-        - "/var/run/docker.sock:/var/run/docker.sock:ro" # Acceso al socket de Docker
-        - portainer_data:/data # Volumen para persistir la data de Portainer
-        command: -H unix:///var/run/docker.sock
-        labels:
-            # Activamos Traefik para este contenedor
-            - "traefik.enable=true"
-            # Regla: si el host es 'portainer.localhost', reenvía a este servicio
-            - "traefik.http.routers.portainer.rule=Host(`portainer.localhost`)"
-            # Definimos el punto de entrada (entrypoint) como 'web' (puerto 80)
-            - "traefik.http.routers.portainer.entrypoints=web"
-            # IMPORTANTE: Decirle a Traefik cuál es el puerto interno del servicio web (9000)
-            - "traefik.http.services.portainer.loadbalancer.server.port=9000"
-        profiles: ["storage", "pipeline"]
-
-
-      # --- CAPA DE ALMACENAMIENTO (HDFS)  ---
+    # --- CAPA DE ALMACENAMIENTO (HDFS)  ---
     namenode:
         image: apache/hadoop:3.5.0
         container_name: namenode
